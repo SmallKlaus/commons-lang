@@ -496,8 +496,8 @@ public class ClassUtils {
         className = className.substring(dim);
         if (className.startsWith("L")) {
             className = className.substring(1, className.endsWith(";") ? className.length() - 1 : className.length());
-        } else if (!className.isEmpty()) {
-            className = reverseAbbreviationMap.get(className.substring(0, 1));
+        } else if (className.length() == 1 && reverseAbbreviationMap.containsKey(className)) {
+            className = reverseAbbreviationMap.get(className);
         }
         final StringBuilder canonicalClassNameBuffer = new StringBuilder(className.length() + dim * 2);
         canonicalClassNameBuffer.append(className);
