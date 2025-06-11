@@ -51,7 +51,7 @@ jobs:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         run: |
           mvn verify sonar:sonar \
-            -Dsonar.projectKey=commons-lang \
-            -Dsonar.projectName='commons-lang' \
+            -Dsonar.projectKey=SmallKlaus_commons-lang \
+            -Dsonar.projectName='SmallKlaus_commons-lang' \
             -Dsonar.organization=smallklaus \
             -Dsonar.projectVersion=${{ matrix.tag }}
