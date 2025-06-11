@@ -1,0 +1,57 @@
+name: SonarQube Historical Analysis
+
+# Allow manual triggering from the GitHub UI
+on:
+  workflow_dispatch:
+    inputs:
+      tagsToScan:
+        description: 'Comma-separated Git tags to scan (e.g., v1.0.0,v1.1.0,v1.2.0)'
+        required: true
+
+jobs:
+  sonar-analysis:
+    runs-on: ubuntu-latest
+    
+    # This matrix will create a parallel job for each tag you input
+    strategy:
+      matrix:
+        tag: ${{ fromJson(format('["{0}"]', join(split(github.event.inputs.tagsToScan, ','), '","'))) }}
+      fail-fast: false # Don't cancel all jobs if one version fails to build
+
+    name: Analyze Tag ${{ matrix.tag }}
+    
+    steps:
+      - name: Checkout code at version ${{ matrix.tag }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.tag }}
+          # Fetch all history so SonarQube can accurately calculate blame/new code
+          fetch-depth: 0 
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17' # Adjust to the project's required Java version
+          distribution: 'temurin'
+
+      # Cache Maven dependencies to speed up builds
+      - name: Cache Maven packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2
+
+      - name: Run SonarQube Analysis
+        # This example uses Maven. Adapt for Gradle if needed.
+        # It assumes SONAR_TOKEN and SONAR_HOST_URL are set as repository secrets.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        run: |
+          mvn verify sonar:sonar \
+            -Dsonar.projectKey=commons-lang \
+            -Dsonar.projectName='commons-lang' \
+            -Dsonar.organization=smallklaus \
+            -Dsonar.projectVersion=${{ matrix.tag }}
