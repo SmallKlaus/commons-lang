@@ -1,0 +1,65 @@
+name: SonarQube Historical Analysis
+
+# Allow manual triggering from the GitHub UI
+on:
+  workflow_dispatch:
+    inputs:
+      tagsToScan:
+        description: 'Comma-separated Git tags to scan (e.g., v1.0.0,v1.1.0,v1.2.0)'
+        required: true
+
+jobs:
+  # This job takes the comma-separated string and converts it to a JSON array
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.set-tags.outputs.tags_json }}
+    steps:
+      - name: Prepare tags for matrix
+        id: set-tags
+        run: |
+          # This converts "v1,v2,v3" into ["v1","v2","v3"]
+          tags_json=$(echo '[ "${{ github.event.inputs.tagsToScan }}" ]' | sed 's/,/","/g')
+          echo "tags_json=$tags_json" >> $GITHUB_OUTPUT
+  # This job runs the analysis in parallel using the matrix from the setup job
+  sonar-analysis:
+    needs: setup # This ensures the 'setup' job runs first
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # fromJSON correctly parses the output from the 'setup' job
+        tag: ${{ fromJSON(needs.setup.outputs.tags) }}
+      fail-fast: false
+
+    name: Analyze Tag ${{ matrix.tag }}
+    
+    steps:
+      - name: Checkout code at version ${{ matrix.tag }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.tag }}
+          fetch-depth: 0
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Cache Maven packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2
+
+      - name: Run SonarQube Analysis
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          mvn verify sonar:sonar \
+            -Dsonar.projectKey=SmallKlaus_commons-lang \
+            -Dsonar.organization=smallklaus \
+            -Dsonar.projectVersion=${{ matrix.tag }} \
+            -Dsonar.host.url=https://sonarcloud.io
