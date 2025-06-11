@@ -60,7 +60,7 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
           mvn verify sonar:sonar \
-            -Dsonar.projectKey=SmallKlaus_commons-lang \
+            -Dsonar.projectKey=smallklaus_commons-lang \
             -Dsonar.organization=smallklaus \
             -Dsonar.projectVersion=${{ matrix.tag }} \
             -Dsonar.host.url=https://sonarcloud.io
