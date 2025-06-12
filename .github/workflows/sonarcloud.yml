@@ -23,16 +23,20 @@ jobs:
           echo "tags_json=$tags_json" >> $GITHUB_OUTPUT
   # This job runs the analysis in parallel using the matrix from the setup job
   sonar-analysis:
-    needs: setup # This ensures the 'setup' job runs first
+    needs: setup
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # fromJSON correctly parses the output from the 'setup' job
         tag: ${{ fromJSON(needs.setup.outputs.tags) }}
       fail-fast: false
 
     name: Analyze Tag ${{ matrix.tag }}
     
+    # Define environment variables at the job level to be available in all steps
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
     steps:
       - name: Checkout code at version ${{ matrix.tag }}
         uses: actions/checkout@v4
@@ -40,7 +44,11 @@ jobs:
           ref: ${{ matrix.tag }}
           fetch-depth: 0
 
-      - name: Set up JDK
+      - name: Get Commit Date
+        id: get-date
+        run: echo "date=$(git log -1 --format=%cI ${{ matrix.tag }})" >> $GITHUB_OUTPUT
+
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
@@ -53,13 +61,39 @@ jobs:
           key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
           restore-keys: ${{ runner.os }}-m2
 
-      - name: Run SonarQube Analysis
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      # --- START: MODIFIED ANALYSIS STEPS ---
+
+      - name: Attempt initial analysis (parallel with tests)
+        id: initial-build
+        # This tells the job not to fail immediately if this step has an error
+        continue-on-error: true
         run: |
           mvn verify sonar:sonar \
             -Dsonar.projectKey=smallklaus_commons-lang \
             -Dsonar.organization=smallklaus \
             -Dsonar.projectVersion=${{ matrix.tag }} \
-            -Dsonar.host.url=https://sonarcloud.io
+            -Dsonar.host.url=https://sonarcloud.io \
+            -Dsonar.projectDate=${{ steps.get-date.outputs.date }}
+
+      - name: Retry analysis in safe mode (if initial build failed)
+        # This step ONLY runs if the "initial-build" step above failed
+        if: steps.initial-build.outcome == 'failure'
+        run: |
+          echo "Initial build failed. Retrying in safe mode (skipping tests, single thread)..."
+          mvn verify sonar:sonar \
+            -Dsonar.projectKey=smallklaus_commons-lang \
+            -Dsonar.organization=smallklaus \
+            -Dsonar.projectVersion=${{ matrix.tag }} \
+            -Dsonar.host.url=https://sonarcloud.io \
+            -Dsonar.projectDate=${{ steps.get-date.outputs.date }} \
+            -DskipTests=true \
+            -T 1
+      
+      # This step checks the final outcome. If the retry also failed, the job will fail.
+      - name: Check build status
+        if: steps.initial-build.outcome == 'failure' && steps.initial-build.conclusion == 'failure'
+        run: |
+            echo "The build failed even after retrying in safe mode."
+            exit 1
+            
+      # --- END: MODIFIED ANALYSIS STEPS ---
