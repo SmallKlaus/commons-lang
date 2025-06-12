@@ -26,7 +26,6 @@ jobs:
           # This script creates a JSON array of objects, e.g., [{"tag":"v1.0","date":"2022-01-15"}, ...]
           tags_input="${{ github.event.inputs.tagsToScan }}"
           
-          # CORRECTED COMMAND: Use sort -V for robust, universal version sorting
           # This converts the comma-separated string to a newline-separated list and then version-sorts it.
           sorted_tags=$(echo "$tags_input" | sed 's/,/\n/g' | sort -V)
 
@@ -67,22 +66,30 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
       
-      - name: Build project (no sonar submission)
+       # --- START: MODIFIED BUILD & RETRY LOGIC ---
+
+      - name: Attempt initial build (with tests, parallel)
         id: initial-build
+        # This tells the job not to fail immediately if this step has an error
         continue-on-error: true
         run: |
-          # We run 'verify' to compile code and run checks, but NOT sonar:sonar
+          # It runs tests and uses multiple threads
           mvn clean verify
 
-      - name: Retry with safe mode
-        if: steps.initial-build.outcome == 'failue'
+      - name: Retry build in safe mode (if initial build failed)
+        # This step ONLY runs if the "initial-build" step above failed
+        if: steps.initial-build.outcome == 'failure'
         run: |
+          echo "Initial build failed. Retrying in safe mode (skipping tests, single thread)..."
+          # This is the "safe mode" fallback
           mvn clean verify -DskipTests=true -T 1
-
+      
       - name: Upload build artifact
+        # This step ONLY runs if one of the above build attempts succeeded
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: build-results-${{ matrix.item.tag }}
+          name: build-results-${{ replace(matrix.item.tag, '/', '-') }}
           path: . # Upload the entire project directory
 
   # Job 3: Submit all analyses sequentially
@@ -112,10 +119,19 @@ jobs:
             tag=$(_jq '.tag')
             date=$(_jq '.date')
 
-            echo "--- Submitting analysis for $tag (Date: $date) ---"
+            #Sanitize the tag name to match the artifact name (replace / with -)
+            sanitized_tag=${tag//\//-}
 
-            # The artifact was downloaded into a subdirectory named after the artifact name
-            project_path="artifacts/build-results-$tag"
+            echo "--- Submitting analysis for $tag (Artifact: build-results-$sanitized_tag) ---"
+
+            # Use the sanitized name to find the correct directory
+            project_path="artifacts/build-results-$sanitized_tag"
+            
+            # Check if the directory exists before proceeding
+            if [ ! -d "$project_path" ]; then
+              echo "ERROR: Artifact directory not found for tag $tag. Expected at $project_path"
+              exit 1
+            fi
             
             # Run sonar:sonar from the downloaded project path
             mvn -f "$project_path/pom.xml" sonar:sonar \
