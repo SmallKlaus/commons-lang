@@ -85,7 +85,8 @@ jobs:
         if: success()
         run: |
           # Bash parameter expansion to replace all instances of '/' with '-'
-          sanitized_name="${{ matrix.item.tag }//\//-}"
+          tag_value="${{ matrix.item.tag }}"
+          sanitized_name="${tag_value//\//-}"
           echo "sanitized_name=$sanitized_name" >> $GITHUB_OUTPUT
 
       - name: Upload build artifact
