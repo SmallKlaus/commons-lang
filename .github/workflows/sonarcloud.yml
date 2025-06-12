@@ -49,7 +49,6 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # The matrix now iterates over the JSON objects created in the setup job
         item: ${{ fromJSON(needs.setup.outputs.matrix) }}
       fail-fast: false
 
@@ -66,32 +65,37 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
       
-       # --- START: MODIFIED BUILD & RETRY LOGIC ---
-
       - name: Attempt initial build (with tests, parallel)
         id: initial-build
-        # This tells the job not to fail immediately if this step has an error
         continue-on-error: true
-        run: |
-          # It runs tests and uses multiple threads
-          mvn clean verify
+        run: mvn clean verify
 
       - name: Retry build in safe mode (if initial build failed)
-        # This step ONLY runs if the "initial-build" step above failed
         if: steps.initial-build.outcome == 'failure'
         run: |
           echo "Initial build failed. Retrying in safe mode (skipping tests, single thread)..."
-          # This is the "safe mode" fallback
           mvn clean verify -DskipTests=true -T 1
       
+      # --- START:  ARTIFACT UPLOAD LOGIC ---
+
+      #  Sanitize the tag name using a shell command
+      - name: Sanitize tag name for artifact
+        id: sanitizer
+        # This step only runs if a build was successful
+        if: success()
+        run: |
+          # Bash parameter expansion to replace all instances of '/' with '-'
+          sanitized_name="${{ matrix.item.tag }//\//-}"
+          echo "sanitized_name=$sanitized_name" >> $GITHUB_OUTPUT
+
       - name: Upload build artifact
-        # This step ONLY runs if one of the above build attempts succeeded
+        # This step  only runs if a build was successful
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: build-results-${{ replace(matrix.item.tag, '/', '-') }}
-          path: . # Upload the entire project directory
-
+          # Use the output from the sanitizer step as the name
+          name: build-results-${{ steps.sanitizer.outputs.sanitized_name }}
+          path: .
   # Job 3: Submit all analyses sequentially
   submit-to-sonarcloud:
     needs: [setup, build-and-package] # Runs only after all builds are done
