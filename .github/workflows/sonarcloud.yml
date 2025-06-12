@@ -24,16 +24,19 @@ jobs:
         id: set-matrix
         run: |
           # This script creates a JSON array of objects, e.g., [{"tag":"v1.0","date":"2022-01-15"}, ...]
-          # It ensures the list is sorted chronologically by tag name.
           tags_input="${{ github.event.inputs.tagsToScan }}"
           
-          # Use git tag --sort to ensure chronological order
-          sorted_tags=$(for tag in $(echo $tags_input | sed "s/,/ /g"); do echo $tag; done | git tag --sort=v:refname --stdin)
+          # CORRECTED COMMAND: Use sort -V for robust, universal version sorting
+          # This converts the comma-separated string to a newline-separated list and then version-sorts it.
+          sorted_tags=$(echo "$tags_input" | sed 's/,/\n/g' | sort -V)
 
           json_objects=""
           for tag in $sorted_tags; do
-            date=$(git log -1 --format=%as "$tag")
-            json_objects+=$(printf '{"tag":"%s","date":"%s"},' "$tag" "$date")
+            # Ensure the tag is not empty before processing
+            if [ -n "$tag" ]; then
+              date=$(git log -1 --format=%as "$tag")
+              json_objects+=$(printf '{"tag":"%s","date":"%s"},' "$tag" "$date")
+            fi
           done
           
           # Remove trailing comma and wrap in brackets to form a valid JSON array
