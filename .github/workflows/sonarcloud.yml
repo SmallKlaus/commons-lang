@@ -154,7 +154,12 @@ jobs:
               -Dsonar.projectVersion=$tag \
               -Dsonar.host.url=https://sonarcloud.io \
               -Dsonar.projectDate=$date
+              
+            echo "Pausing for 45 seconds to allow SonarCloud to process the task..."
+            sleep 45
+            echo ""
           done
+            
   # Job 4: Export detailed analysis reports for each version to CSV files
   export-reports:
     needs: [setup, submit-to-sonarcloud] # Runs only after all submissions are done
