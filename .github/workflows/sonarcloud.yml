@@ -173,28 +173,48 @@ jobs:
 
             # PART D: EXPORT REPORTS
             echo "3. Exporting CSV reports for $tag..."
-            
-            # Metrics CSV
-            metric_keys="bugs,reliability_rating,vulnerabilities,security_rating,security_hotspots,security_review_rating,code_smells,sqale_rating,sqale_index,sqale_debt_ratio,coverage,lines_to_cover,uncovered_lines,tests,test_success_density,duplicated_lines_density,duplicated_lines,duplicated_blocks,ncloc,lines,files,functions,classes,comment_lines_density,complexity,cognitive_complexity"
-            metrics_response=$(curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/measures/component?component=${SONAR_PROJECT}&branch=${tag}&metricKeys=${metric_keys}")
-            echo $(echo "$metrics_response" | jq -r '.component.measures | map(.metric) | @csv') > reports/metrics-${tag}.csv
-            echo $(echo "$metrics_response" | jq -r '.component.measures | map(.value) | @csv') >> reports/metrics-${tag}.csv
 
-            # Open Issues CSV
-            echo "Key,Rule,Severity,Type,FilePath,Line,CreationDate,UpdateDate,TextRange,Message" > reports/open-issues-${tag}.csv
+            # PART D: EXPORT REPORTS (Now with validation and corrected filenames)
+            echo "4. Exporting CSV reports for $tag..."
+            
+            # --- Metrics CSV ---
+            metrics_response=$(curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/measures/component?component=${SONAR_PROJECT}&branch=${tag}&metricKeys=bugs,reliability_rating,vulnerabilities,security_rating,security_hotspots,security_review_rating,code_smells,sqale_rating,sqale_index,sqale_debt_ratio,coverage,lines_to_cover,uncovered_lines,tests,test_success_density,duplicated_lines_density,duplicated_lines,duplicated_blocks,ncloc,lines,files,functions,classes,comment_lines_density,complexity,cognitive_complexity")
+            # VALIDATION: Check if the API returned a valid component before processing
+            if [[ $(echo "$metrics_response" | jq 'has("component")') == "true" ]]; then
+              # FIXED: Use sanitized_tag for the filename
+              echo $(echo "$metrics_response" | jq -r '.component.measures | map(.metric) | @csv') > reports/metrics-${sanitized_tag}.csv
+              echo $(echo "$metrics_response" | jq -r '.component.measures | map(.value) | @csv') >> reports/metrics-${sanitized_tag}.csv
+            else
+              echo "WARNING: Could not fetch metrics for tag $tag. API response: $metrics_response"
+            fi
+
+            # --- Open Issues CSV ---
+            # FIXED: Use sanitized_tag for the filename
+            echo "Key,Rule,Severity,Type,FilePath,Line,Message" > reports/open-issues-${sanitized_tag}.csv
             page=1; while : ; do
-              issues_response=$(curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT}&branch=${tag}&statuses=OPEN,CONFIRMED&ps=500&p=${page}&f=key,rule,severity,type,component,line,creationDate,updateDate,textRange,message")
-              if [ -z "$(echo "$issues_response" | jq '.issues[]')" ]; then break; fi
-              echo "$issues_response" | jq -r '.issues[] | [.key,.rule,.severity,.type,.component,.line,.message] | @csv' >> reports/open-issues-${tag}.csv
+              issues_response=$(curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT}&branch=${tag}&statuses=OPEN,CONFIRMED&ps=500&p=${page}&f=key,rule,severity,type,component,line,message")
+              # VALIDATION: Check if the API returned an 'issues' array
+              if [[ $(echo "$issues_response" | jq 'has("issues")') != "true" ]]; then
+                echo "WARNING: Could not fetch open issues for tag $tag. API response: $issues_response"
+                break # Exit the while loop for this report
+              fi
+              if [ -z "$(echo "$issues_response" | jq '.issues[]')" ]; then break; fi # Exit if page is empty
+              echo "$issues_response" | jq -r '.issues[] | [.key,.rule,.severity,.type,.component,.line,.message] | @csv' >> reports/open-issues-${sanitized_tag}.csv
               page=$((page + 1)); done
 
-            # Fixed Issues CSV
+            # --- Fixed Issues CSV ---
             if [ -n "$previous_date" ]; then
-              echo "Key,Rule,Severity,Type,FilePath,Line,CreationDate,UpdateDate,TextRange,Message" > reports/fixed-issues-${tag}.csv
+              # FIXED: Use sanitized_tag for the filename
+              echo "Key,Rule,Severity,Type,FilePath,Line,Message" > reports/fixed-issues-${sanitized_tag}.csv
               page=1; while : ; do
-                fixed_issues_response=$(curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT}&branch=${tag}&statuses=RESOLVED,CLOSED&resolutions=FIXED&resolvedAfter=${previous_date}&ps=500&p=${page}&f=key,rule,severity,type,component,line,creationDate,updateDate,textRange,message")
-                if [ -z "$(echo "$fixed_issues_response" | jq '.issues[]')" ]; then break; fi
-                echo "$fixed_issues_response" | jq -r '.issues[] | [.key,.rule,.severity,.type,.component,.line,.message] | @csv' >> reports/fixed-issues-${tag}.csv
+                fixed_issues_response=$(curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT}&branch=${tag}&statuses=RESOLVED,CLOSED&resolutions=FIXED&resolvedAfter=${previous_date}&ps=500&p=${page}&f=key,rule,severity,type,component,line,message")
+                # VALIDATION: Check if the API returned an 'issues' array
+                if [[ $(echo "$fixed_issues_response" | jq 'has("issues")') != "true" ]]; then
+                  echo "WARNING: Could not fetch fixed issues for tag $tag. API response: $fixed_issues_response"
+                  break # Exit the while loop for this report
+                fi
+                if [ -z "$(echo "$fixed_issues_response" | jq '.issues[]')" ]; then break; fi # Exit if page is empty
+                echo "$fixed_issues_response" | jq -r '.issues[] | [.key,.rule,.severity,.type,.component,.line,.message] | @csv' >> reports/fixed-issues-${sanitized_tag}.csv
                 page=$((page + 1)); done
             fi
             
@@ -203,7 +223,6 @@ jobs:
             echo ""
           done
 
-      # STEP 5: Upload all the generated reports as a single artifact
       - name: Upload All Reports
         uses: actions/upload-artifact@v4
         with:
