@@ -149,28 +149,29 @@ jobs:
               continue
             fi
 
-            # PART A: SUBMIT ANALYSIS
-            echo "1. Restoring Git context and submitting analysis for $tag..."
-            ( # Run in a subshell to avoid subsequent git commands affecting the main checkout
-              cd "$artifact_path"
-              git init > /dev/null
-              git remote add origin "https://github.com/${{ github.repository }}" > /dev/null
-              git fetch origin "$tag" --depth=1 > /dev/null
-              git checkout -f "$tag" > /dev/null
-              
-              mvn sonar:sonar \
-                -Dsonar.projectKey=${SONAR_PROJECT} \
-                -Dsonar.organization=${SONAR_ORG} \
-                -Dsonar.projectVersion=$tag \
-                -Dsonar.host.url=https://sonarcloud.io \
-                -Dsonar.projectDate=$date
-            )
+            # PART A: PREPARE WORKING DIRECTORY
+            echo "1. Checking out tag: $tag"
+            git checkout -f "$tag"
+
+            echo "2. Merging pre-built 'target' directory from artifact..."
+            # Remove any existing target dir before copying to avoid conflicts
+            rm -rf ./target
+            cp -r "$artifact_path/target" .
+
+            # PART B: SUBMIT ANALYSIS
+            echo "3. Submitting SonarCloud analysis for $tag..."
+            mvn -B sonar:sonar \
+              -Dsonar.projectKey=${SONAR_PROJECT} \
+              -Dsonar.organization=${SONAR_ORG} \
+              -Dsonar.projectVersion=$tag \
+              -Dsonar.host.url=https://sonarcloud.io \
+              -Dsonar.projectDate=$date
             
-            # PART B: WAIT FOR PROCESSING
-            echo "2. Pausing for 60 seconds to allow SonarCloud to process the report..."
+            # PART C: WAIT FOR PROCESSING
+            echo "4. Pausing for 60 seconds to allow SonarCloud to process the report..."
             sleep 60
 
-            # PART C: EXPORT REPORTS
+            # PART D: EXPORT REPORTS
             echo "3. Exporting CSV reports for $tag..."
             
             # Metrics CSV
