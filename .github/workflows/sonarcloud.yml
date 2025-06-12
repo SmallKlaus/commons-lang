@@ -109,6 +109,11 @@ jobs:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
       
     steps:
+      - name: Checkout full repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -116,7 +121,6 @@ jobs:
 
       - name: Submit analyses in order
         run: |
-          # Use jq to iterate through the JSON array from the setup job, ensuring order
           for item in $(echo '${{ needs.setup.outputs.matrix }}' | jq -r '.[] | @base64'); do
             _jq() {
              echo ${item} | base64 --decode | jq -r ${1}
@@ -124,23 +128,27 @@ jobs:
 
             tag=$(_jq '.tag')
             date=$(_jq '.date')
-
-            #Sanitize the tag name to match the artifact name (replace / with -)
             sanitized_tag=${tag//\//-}
+            artifact_path="artifacts/build-results-$sanitized_tag"
 
-            echo "--- Submitting analysis for $tag (Artifact: build-results-$sanitized_tag) ---"
+            echo "--- Processing tag $tag ---"
 
-            # Use the sanitized name to find the correct directory
-            project_path="artifacts/build-results-$sanitized_tag"
-            
-            # Check if the directory exists before proceeding
-            if [ ! -d "$project_path" ]; then
-              echo "ERROR: Artifact directory not found for tag $tag. Expected at $project_path"
-              exit 1
+            # Check if the corresponding artifact was actually downloaded
+            if [ ! -d "$artifact_path" ]; then
+              echo "WARNING: Artifact for tag $tag not found, skipping submission."
+              continue
             fi
+
+            # A) Switch the local Git repo to the correct tag
+            echo "1. Checking out tag: $tag"
+            git checkout -f "$tag"
+
+            # B) Copy the pre-built 'target' directory from the artifact into our live Git checkout
+            echo "2. Merging build results from artifact..."
+            cp -r "$artifact_path/target" .
             
             # Run sonar:sonar from the downloaded project path
-            mvn -f "$project_path/pom.xml" sonar:sonar \
+            mvn sonar:sonar \
               -Dsonar.projectKey=smallklaus_commons-lang \
               -Dsonar.organization=smallklaus \
               -Dsonar.projectVersion=$tag \
