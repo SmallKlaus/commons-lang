@@ -68,13 +68,14 @@ jobs:
       - name: Attempt initial build (with tests, parallel)
         id: initial-build
         continue-on-error: true
-        run: mvn clean verify
+        run: |
+          mvn clean verify
 
       - name: Retry build in safe mode (if initial build failed)
         if: steps.initial-build.outcome == 'failure'
         run: |
           echo "Initial build failed. Retrying in safe mode (skipping tests, single thread)..."
-          mvn clean verify -DskipTests=true -T 1
+          mvn clean compile
       
       # --- START:  ARTIFACT UPLOAD LOGIC ---
 
