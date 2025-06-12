@@ -98,29 +98,40 @@ jobs:
           # Use the output from the sanitizer step as the name
           name: build-results-${{ steps.sanitizer.outputs.sanitized_name }}
           path: .
-  # Job 3: Submit all analyses sequentially
-  submit-to-sonarcloud:
+
+    # Job 3: Submit, Wait, and Export Analysis for each version sequentially
+  submit-and-export-sequentially:
     needs: [setup, build-and-package] # Runs only after all builds are done
     runs-on: ubuntu-latest
-    name: Sequential Sonar Submission
+    name: Sequential Submit and Export
 
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_ORG: smallklaus 
+      SONAR_PROJECT: smallklaus_commons-lang  
       
     steps:
+      # STEP 1: Checkout the full repository history to provide Git context
       - name: Checkout full repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          
-      - name: Download all artifacts
+
+      # STEP 2: Download all the build artifacts from the parallel jobs
+      - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts # Download all artifacts into a parent 'artifacts' directory
+          path: artifacts
 
-      - name: Submit analyses in order
+      # STEP 3: Create a directory to store the final reports
+      - name: Create report directory
+        run: mkdir -p reports
+      
+      # STEP 4: Loop through tags to submit, wait, and export
+      - name: Submit, Wait, and Export Loop
         run: |
+          previous_date=""
           for item in $(echo '${{ needs.setup.outputs.matrix }}' | jq -r '.[] | @base64'); do
             _jq() {
              echo ${item} | base64 --decode | jq -r ${1}
@@ -133,109 +144,65 @@ jobs:
 
             echo "--- Processing tag $tag ---"
 
-            # Check if the corresponding artifact was actually downloaded
             if [ ! -d "$artifact_path" ]; then
-              echo "WARNING: Artifact for tag $tag not found, skipping submission."
+              echo "WARNING: Artifact for tag $tag not found, skipping."
               continue
             fi
 
-            # A) Switch the local Git repo to the correct tag
-            echo "1. Checking out tag: $tag"
-            git checkout -f "$tag"
-
-            # B) Copy the pre-built 'target' directory from the artifact into our live Git checkout
-            echo "2. Merging build results from artifact..."
-            cp -r "$artifact_path/target" .
-            
-            # Run sonar:sonar from the downloaded project path
-            mvn sonar:sonar \
-              -Dsonar.projectKey=smallklaus_commons-lang \
-              -Dsonar.organization=smallklaus \
-              -Dsonar.projectVersion=$tag \
-              -Dsonar.host.url=https://sonarcloud.io \
-              -Dsonar.projectDate=$date
+            # PART A: SUBMIT ANALYSIS
+            echo "1. Restoring Git context and submitting analysis for $tag..."
+            ( # Run in a subshell to avoid subsequent git commands affecting the main checkout
+              cd "$artifact_path"
+              git init > /dev/null
+              git remote add origin "https://github.com/${{ github.repository }}" > /dev/null
+              git fetch origin "$tag" --depth=1 > /dev/null
+              git checkout -f "$tag" > /dev/null
               
-            echo "Pausing for 45 seconds to allow SonarCloud to process the task..."
-            sleep 45
-            echo ""
-          done
+              mvn sonar:sonar \
+                -Dsonar.projectKey=${SONAR_PROJECT} \
+                -Dsonar.organization=${SONAR_ORG} \
+                -Dsonar.projectVersion=$tag \
+                -Dsonar.host.url=https://sonarcloud.io \
+                -Dsonar.projectDate=$date
+            )
             
-  # Job 4: Export detailed analysis reports for each version to CSV files
-  export-reports:
-    needs: [setup, submit-to-sonarcloud] # Runs only after all submissions are done
-    runs-on: ubuntu-latest
-    name: Export Detailed CSV Reports
+            # PART B: WAIT FOR PROCESSING
+            echo "2. Pausing for 60 seconds to allow SonarCloud to process the report..."
+            sleep 60
 
-    steps:
-      - name: Create report directory
-        run: mkdir -p reports
-
-      - name: Generate CSV reports for each version
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_ORG: smallklaus # Replace with your SonarCloud organization key
-          SONAR_PROJECT: smallklaus_commons-lang # Replace with your SonarCloud project key
-        run: |
-          previous_date=""
-          # Use jq to iterate through the JSON array from the setup job, ensuring order
-          for item in $(echo '${{ needs.setup.outputs.matrix }}' | jq -r '.[] | @base64'); do
-            _jq() {
-             echo ${item} | base64 --decode | jq -r ${1}
-            }
-
-            tag=$(_jq '.tag')
-            date=$(_jq '.date')
+            # PART C: EXPORT REPORTS
+            echo "3. Exporting CSV reports for $tag..."
             
-            echo "--- Generating reports for tag: $tag ---"
-
-            # --- 1. METRICS CSV ---
-            echo "Generating metrics CSV..."
+            # Metrics CSV
             metric_keys="bugs,reliability_rating,vulnerabilities,security_rating,security_hotspots,security_review_rating,code_smells,sqale_rating,sqale_index,sqale_debt_ratio,coverage,lines_to_cover,uncovered_lines,tests,test_success_density,duplicated_lines_density,duplicated_lines,duplicated_blocks,ncloc,lines,files,functions,classes,comment_lines_density,complexity,cognitive_complexity"
-            
-            metrics_response=$(curl -s -u "${SONAR_TOKEN}:" \
-              "https://sonarcloud.io/api/measures/component?component=${SONAR_PROJECT}&branch=${tag}&metricKeys=${metric_keys}")
-
+            metrics_response=$(curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/measures/component?component=${SONAR_PROJECT}&branch=${tag}&metricKeys=${metric_keys}")
             echo $(echo "$metrics_response" | jq -r '.component.measures | map(.metric) | @csv') > reports/metrics-${tag}.csv
             echo $(echo "$metrics_response" | jq -r '.component.measures | map(.value) | @csv') >> reports/metrics-${tag}.csv
 
-
-            # --- 2. OPEN ISSUES CSV ---
-            echo "Generating open issues CSV..."
+            # Open Issues CSV
             echo "Key,Rule,Severity,Type,FilePath,Line,CreationDate,UpdateDate,TextRange,Message" > reports/open-issues-${tag}.csv
-            page=1
-            while : ; do
-              issues_response=$(curl -s -u "${SONAR_TOKEN}:" \
-                "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT}&branch=${tag}&statuses=OPEN,CONFIRMED&ps=500&p=${page}&f=key,rule,severity,type,component,line,creationDate,updateDate,textRange,message")
-              
+            page=1; while : ; do
+              issues_response=$(curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT}&branch=${tag}&statuses=OPEN,CONFIRMED&ps=500&p=${page}&f=key,rule,severity,type,component,line,creationDate,updateDate,textRange,message")
               if [ -z "$(echo "$issues_response" | jq '.issues[]')" ]; then break; fi
+              echo "$issues_response" | jq -r '.issues[] | [.key,.rule,.severity,.type,.component,.line,.message] | @csv' >> reports/open-issues-${tag}.csv
+              page=$((page + 1)); done
 
-              echo "$issues_response" | jq -r '.issues[] | [.key,.rule,.severity,.type,.component,.line,.creationDate,.updateDate,(.textRange|tostring),.message] | @csv' >> reports/open-issues-${tag}.csv
-              
-              page=$((page + 1))
-            done
-
-
-            # --- 3. FIXED ISSUES CSV ---
+            # Fixed Issues CSV
             if [ -n "$previous_date" ]; then
-              echo "Generating fixed issues CSV (since $previous_date)..."
               echo "Key,Rule,Severity,Type,FilePath,Line,CreationDate,UpdateDate,TextRange,Message" > reports/fixed-issues-${tag}.csv
-              page=1
-              while : ; do
-                fixed_issues_response=$(curl -s -u "${SONAR_TOKEN}:" \
-                  "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT}&branch=${tag}&statuses=RESOLVED,CLOSED&resolutions=FIXED&resolvedAfter=${previous_date}&ps=500&p=${page}&f=key,rule,severity,type,component,line,creationDate,updateDate,textRange,message")
-                
+              page=1; while : ; do
+                fixed_issues_response=$(curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT}&branch=${tag}&statuses=RESOLVED,CLOSED&resolutions=FIXED&resolvedAfter=${previous_date}&ps=500&p=${page}&f=key,rule,severity,type,component,line,creationDate,updateDate,textRange,message")
                 if [ -z "$(echo "$fixed_issues_response" | jq '.issues[]')" ]; then break; fi
-
-                echo "$fixed_issues_response" | jq -r '.issues[] | [.key,.rule,.severity,.type,.component,.line,.creationDate,.updateDate,(.textRange|tostring),.message] | @csv' >> reports/fixed-issues-${tag}.csv
-                
-                page=$((page + 1))
-              done
+                echo "$fixed_issues_response" | jq -r '.issues[] | [.key,.rule,.severity,.type,.component,.line,.message] | @csv' >> reports/fixed-issues-${tag}.csv
+                page=$((page + 1)); done
             fi
             
             previous_date=$date
-            echo "--- Finished reports for $tag ---"
+            echo "--- Finished processing tag $tag ---"
+            echo ""
           done
 
+      # STEP 5: Upload all the generated reports as a single artifact
       - name: Upload All Reports
         uses: actions/upload-artifact@v4
         with:
