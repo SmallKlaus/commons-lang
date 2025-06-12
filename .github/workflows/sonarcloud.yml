@@ -155,3 +155,84 @@ jobs:
               -Dsonar.host.url=https://sonarcloud.io \
               -Dsonar.projectDate=$date
           done
+  # Job 4: Export detailed analysis reports for each version to CSV files
+  export-reports:
+    needs: [setup, submit-to-sonarcloud] # Runs only after all submissions are done
+    runs-on: ubuntu-latest
+    name: Export Detailed CSV Reports
+
+    steps:
+      - name: Create report directory
+        run: mkdir -p reports
+
+      - name: Generate CSV reports for each version
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_ORG: smallklaus # Replace with your SonarCloud organization key
+          SONAR_PROJECT: smallklaus_commons-lang # Replace with your SonarCloud project key
+        run: |
+          previous_date=""
+          # Use jq to iterate through the JSON array from the setup job, ensuring order
+          for item in $(echo '${{ needs.setup.outputs.matrix }}' | jq -r '.[] | @base64'); do
+            _jq() {
+             echo ${item} | base64 --decode | jq -r ${1}
+            }
+
+            tag=$(_jq '.tag')
+            date=$(_jq '.date')
+            
+            echo "--- Generating reports for tag: $tag ---"
+
+            # --- 1. METRICS CSV ---
+            echo "Generating metrics CSV..."
+            metric_keys="bugs,reliability_rating,vulnerabilities,security_rating,security_hotspots,security_review_rating,code_smells,sqale_rating,sqale_index,sqale_debt_ratio,coverage,lines_to_cover,uncovered_lines,tests,test_success_density,duplicated_lines_density,duplicated_lines,duplicated_blocks,ncloc,lines,files,functions,classes,comment_lines_density,complexity,cognitive_complexity"
+            
+            metrics_response=$(curl -s -u "${SONAR_TOKEN}:" \
+              "https://sonarcloud.io/api/measures/component?component=${SONAR_PROJECT}&branch=${tag}&metricKeys=${metric_keys}")
+
+            echo $(echo "$metrics_response" | jq -r '.component.measures | map(.metric) | @csv') > reports/metrics-${tag}.csv
+            echo $(echo "$metrics_response" | jq -r '.component.measures | map(.value) | @csv') >> reports/metrics-${tag}.csv
+
+
+            # --- 2. OPEN ISSUES CSV ---
+            echo "Generating open issues CSV..."
+            echo "Key,Rule,Severity,Type,FilePath,Line,CreationDate,UpdateDate,TextRange,Message" > reports/open-issues-${tag}.csv
+            page=1
+            while : ; do
+              issues_response=$(curl -s -u "${SONAR_TOKEN}:" \
+                "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT}&branch=${tag}&statuses=OPEN,CONFIRMED&ps=500&p=${page}&f=key,rule,severity,type,component,line,creationDate,updateDate,textRange,message")
+              
+              if [ -z "$(echo "$issues_response" | jq '.issues[]')" ]; then break; fi
+
+              echo "$issues_response" | jq -r '.issues[] | [.key,.rule,.severity,.type,.component,.line,.creationDate,.updateDate,(.textRange|tostring),.message] | @csv' >> reports/open-issues-${tag}.csv
+              
+              page=$((page + 1))
+            done
+
+
+            # --- 3. FIXED ISSUES CSV ---
+            if [ -n "$previous_date" ]; then
+              echo "Generating fixed issues CSV (since $previous_date)..."
+              echo "Key,Rule,Severity,Type,FilePath,Line,CreationDate,UpdateDate,TextRange,Message" > reports/fixed-issues-${tag}.csv
+              page=1
+              while : ; do
+                fixed_issues_response=$(curl -s -u "${SONAR_TOKEN}:" \
+                  "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT}&branch=${tag}&statuses=RESOLVED,CLOSED&resolutions=FIXED&resolvedAfter=${previous_date}&ps=500&p=${page}&f=key,rule,severity,type,component,line,creationDate,updateDate,textRange,message")
+                
+                if [ -z "$(echo "$fixed_issues_response" | jq '.issues[]')" ]; then break; fi
+
+                echo "$fixed_issues_response" | jq -r '.issues[] | [.key,.rule,.severity,.type,.component,.line,.creationDate,.updateDate,(.textRange|tostring),.message] | @csv' >> reports/fixed-issues-${tag}.csv
+                
+                page=$((page + 1))
+              done
+            fi
+            
+            previous_date=$date
+            echo "--- Finished reports for $tag ---"
+          done
+
+      - name: Upload All Reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonar-detailed-reports
+          path: reports/
