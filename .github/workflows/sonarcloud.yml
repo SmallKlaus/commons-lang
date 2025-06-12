@@ -46,7 +46,7 @@ jobs:
 
       - name: Get Commit Date
         id: get-date
-        run: echo "date=$(git log -1 --format=%cI ${{ matrix.tag }})" >> $GITHUB_OUTPUT
+        run: echo "date=$(git log -1 --format=%as ${{ matrix.tag }})" >> $GITHUB_OUTPUT
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -78,9 +78,11 @@ jobs:
       - name: Retry analysis in safe mode (if initial build failed)
         # This step ONLY runs if the "initial-build" step above failed
         if: steps.initial-build.outcome == 'failure'
+        # Skips packaging, stops aftar class. generation
         run: |
           echo "Initial build failed. Retrying in safe mode (skipping tests, single thread)..."
-          mvn verify sonar:sonar \
+          
+          mvn compile sonar:sonar \
             -Dsonar.projectKey=smallklaus_commons-lang \
             -Dsonar.organization=smallklaus \
             -Dsonar.projectVersion=${{ matrix.tag }} \
