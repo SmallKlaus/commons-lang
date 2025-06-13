@@ -1,8 +1,8 @@
-# This GitHub workflow extracts commits between version tags and uses a Natural Language Processing (NLP)
-# model via the Hugging Face API for binary classification. It identifies commits that are new features
-# and exports their data to a CSV file for each version interval.
+# This GitHub workflow extracts commits between version tags. It integrates with Apache's public Jira
+# to enrich commit data, then uses an NLP model for binary classification. It identifies commits
+# that are new features, filters for changes in .java files, and exports detailed per-file data to a CSV file.
 
-name: Extract Feature Commits with NLP
+name: Extract Feature Commits with NLP and Jira Integration
 
 on:
   workflow_dispatch:
@@ -52,15 +52,15 @@ jobs:
               return response.json()
 
           if __name__ == "__main__":
-              # Read the commit message from standard input for safer handling of special characters
-              commit_message = sys.stdin.read().strip()
+              # Read the context from standard input for safer handling of special characters
+              context = sys.stdin.read().strip()
               
               # Use binary labels for a clearer feature vs. non-feature distinction
               candidate_labels = ["new feature", "other"]
               
               try:
                   output = query({
-                      "inputs": commit_message,
+                      "inputs": context,
                       "parameters": {"candidate_labels": candidate_labels},
                   })
 
@@ -120,67 +120,92 @@ jobs:
             
             echo "DEBUG: Loop iteration $i: prev_tag='$prev_tag', next_tag='$next_tag'"
             
-            # Sanitize tag names for use in filenames by replacing slashes
             sanitized_prev_tag=$(echo "$prev_tag" | tr '/' '-')
             sanitized_next_tag=$(echo "$next_tag" | tr '/' '-')
             csv_file="commits_${sanitized_next_tag}_to_${sanitized_prev_tag}.csv"
             
             echo "Processing commits between '$next_tag' and '$prev_tag'"
             echo "Outputting to: $csv_file"
-            echo "commit_hash,commit_message,commit_date,changed_files,lines_added,lines_deleted,percentage_change" > "$csv_file"
+            # Updated CSV header with Jira columns
+            echo "commit_hash,commit_message,commit_date,jira_key,jira_summary,changed_file,lines_added,lines_deleted,percentage_change" > "$csv_file"
 
-            # Get all commit hashes into an array first to avoid subshell issues with pipes
             commit_hashes=()
             while IFS= read -r line; do
                 commit_hashes+=("$line")
             done < <(git log --pretty=%H "$next_tag..$prev_tag")
             echo "DEBUG: Found ${#commit_hashes[@]} commits in range."
 
-            # Loop over the array of commit hashes
             for commit_hash in "${commit_hashes[@]}"; do
-              commit_message=$(git log -1 --pretty=%s "$commit_hash")
-              echo "DEBUG: Processing commit $commit_hash: $commit_message"
+              echo "DEBUG: Processing commit $commit_hash"
 
-              # Classify the commit message by piping it to the Python script
-              classification=$(echo "$commit_message" | python classify_commit.py)
-              echo "DEBUG: Classification result: '$classification'"
+              java_files=$(git diff-tree --no-commit-id --name-only -r "$commit_hash" | grep '\.java$' || true)
 
-              if [ "$classification" == "new feature" ]; then
-                echo "Found feature commit: $commit_hash"
-                commit_date=$(git log -1 --pretty=%ci "$commit_hash")
-                
-                numstat_output=$(git show --numstat --pretty="" "$commit_hash")
-                lines_added=$(echo "$numstat_output" | awk '{s+=$1} END {print s+0}')
-                lines_deleted=$(echo "$numstat_output" | awk '{s+=$2} END {print s+0}')
-                
-                files_changed_list_for_csv=""
-                percentage_change_per_file=""
+              if [ -n "$java_files" ]; then
+                commit_message_full=$(git log -1 --pretty=%B "$commit_hash") # Get full commit message body
+                commit_subject=$(echo "$commit_message_full" | head -n 1) # First line for CSV and initial context
+                echo "DEBUG: Found java files in commit. Subject: '$commit_subject'"
 
-                while IFS= read -r file; do
-                  if [ -z "$file" ]; then continue; fi
-                  files_changed_list_for_csv+="$file; "
+                # --- JIRA INTEGRATION ---
+                # Updated regex to be specific to the 'LANG' project key
+                jira_key=$(echo "$commit_message_full" | grep -o -E 'LANG-[0-9]+' | head -n 1 || true)
+                context_for_nlp="$commit_subject"
+                jira_summary="N/A" # Default value
 
-                  if git cat-file -e "$commit_hash^:$file" 2>/dev/null; then
-                    total_lines_before=$(git show "$commit_hash^:$file" | wc -l)
-                    if [[ $total_lines_before -gt 0 ]]; then
-                      file_diff_stats=$(git diff --numstat "$commit_hash^" "$commit_hash" -- "$file")
-                      added_in_file=$(echo "$file_diff_stats" | awk '{print $1}')
-                      deleted_in_file=$(echo "$file_diff_stats" | awk '{print $2}')
-                      
-                      added_in_file=${added_in_file:-0}
-                      deleted_in_file=${deleted_in_file:-0}
-                      total_changed=$((added_in_file + deleted_in_file))
-                      percent=$(awk -v tc="$total_changed" -v tlb="$total_lines_before" 'BEGIN {printf "%.2f", (tc / tlb) * 100}')
-                      percentage_change_per_file+="$file:${percent}%; "
-                    else
-                      percentage_change_per_file+="$file:100%; " # File was empty
-                    fi
+                if [ -n "$jira_key" ]; then
+                  echo "DEBUG: Found Jira key: $jira_key"
+                  jira_url="https://issues.apache.org/jira/rest/api/2/issue/$jira_key"
+                  # Use curl with -f to fail silently on server errors (like 404), and -s for silent mode
+                  jira_json=$(curl -s -f --connect-timeout 10 "$jira_url")
+                  
+                  if [ -n "$jira_json" ]; then
+                    jira_summary=$(echo "$jira_json" | jq -r '.fields.summary // "N/A"')
+                    jira_issuetype=$(echo "$jira_json" | jq -r '.fields.issuetype.name // "N/A"')
+                    echo "DEBUG: Jira Summary: $jira_summary, Type: $jira_issuetype"
+                    context_for_nlp="Commit subject: $commit_subject. Jira Issue Type: $jira_issuetype. Jira Summary: $jira_summary"
                   else
-                    percentage_change_per_file+="$file:100%; " # New file
+                    echo "DEBUG: Could not fetch details for Jira key $jira_key"
+                    jira_summary="FETCH_FAILED"
                   fi
-                done < <(git diff-tree --no-commit-id --name-only -r "$commit_hash")
+                fi
+                # --- END JIRA INTEGRATION ---
                 
-                echo "\"$commit_hash\",\"$commit_message\",\"$commit_date\",\"$files_changed_list_for_csv\",\"${lines_added}\",\"${lines_deleted}\",\"$percentage_change_per_file\"" >> "$csv_file"
+                java_files_list=$(echo "$java_files" | tr '\n' ' ')
+                context_for_nlp="$context_for_nlp. Files changed: $java_files_list"
+                echo "DEBUG: Context for NLP: '$context_for_nlp'"
+                
+                classification=$(echo "$context_for_nlp" | python classify_commit.py)
+                echo "DEBUG: Classification result: '$classification'"
+
+                if [ "$classification" == "new feature" ]; then
+                  echo "Found feature commit: $commit_hash."
+                  commit_date=$(git log -1 --pretty=%ci "$commit_hash")
+
+                  echo "$java_files" | while IFS= read -r file; do
+                    echo "DEBUG: Processing file: $file"
+
+                    file_diff_stats=$(git diff --numstat "$commit_hash^" "$commit_hash" -- "$file")
+                    lines_added_per_file=$(echo "$file_diff_stats" | awk '{print $1}')
+                    lines_deleted_per_file=$(echo "$file_diff_stats" | awk '{print $2}')
+
+                    percentage_change="0.00"
+                    if git cat-file -e "$commit_hash^:$file" 2>/dev/null; then
+                      total_lines_before=$(git show "$commit_hash^:$file" | wc -l)
+                      if [[ $total_lines_before -gt 0 ]]; then
+                        total_changed=$((lines_added_per_file + lines_deleted_per_file))
+                        percent=$(awk -v tc="$total_changed" -v tlb="$total_lines_before" 'BEGIN {printf "%.2f", (tc / tlb) * 100}')
+                        percentage_change=$percent
+                      else
+                        percentage_change="100.00"
+                      fi
+                    else
+                      percentage_change="100.00"
+                    fi
+                    
+                    echo "\"$commit_hash\",\"$commit_subject\",\"$commit_date\",\"$jira_key\",\"$jira_summary\",\"$file\",\"$lines_added_per_file\",\"$lines_deleted_per_file\",\"${percentage_change}%;\"" >> "$csv_file"
+                  done
+                fi
+              else
+                echo "DEBUG: No .java files found in commit $commit_hash. Skipping."
               fi
             done
           done
