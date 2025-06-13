@@ -52,7 +52,9 @@ jobs:
               return response.json()
 
           if __name__ == "__main__":
-              commit_message = sys.argv[1]
+              # Read the commit message from standard input for safer handling of special characters
+              commit_message = sys.stdin.read().strip()
+              
               # Use binary labels for a clearer feature vs. non-feature distinction
               candidate_labels = ["new feature", "other"]
               
@@ -102,18 +104,23 @@ jobs:
             csv_file="commits_${next_tag//\//-}_to_${prev_tag//\//-}.csv" # Sanitize slashes in filenames
             echo "commit_hash,commit_message,commit_date,changed_files,lines_added,lines_deleted,percentage_change" > $csv_file
 
-            # Get commit hashes and messages for the range
-            git log --pretty='format:%H ||| %s' "$next_tag..$prev_tag" | while IFS=' ||| ' read -r commit_hash commit_message; do
-              # Classify the commit message using the Python script
-              escaped_message=$(printf '%s\n' "$commit_message" | sed "s/'/'\"'\"'/g")
-              classification=$(python classify_commit.py "$escaped_message")
+            # Get all commit hashes into an array first to avoid subshell issues with pipes
+            commit_hashes=()
+            while IFS= read -r line; do
+                commit_hashes+=("$line")
+            done < <(git log --pretty=%H "$next_tag..$prev_tag")
 
-              # Only process commits classified as 'new feature'
+            # Loop over the array of commit hashes
+            for commit_hash in "${commit_hashes[@]}"; do
+              commit_message=$(git log -1 --pretty=%s "$commit_hash")
+
+              # Classify the commit message by piping it to the Python script
+              classification=$(echo "$commit_message" | python classify_commit.py)
+
               if [ "$classification" == "new feature" ]; then
                 echo "Found feature commit: $commit_hash"
                 commit_date=$(git log -1 --pretty=%ci "$commit_hash")
                 
-                # Use --numstat for a robust and machine-readable way to get line counts
                 numstat_output=$(git show --numstat --pretty="" "$commit_hash")
                 lines_added=$(echo "$numstat_output" | awk '{s+=$1} END {print s+0}')
                 lines_deleted=$(echo "$numstat_output" | awk '{s+=$2} END {print s+0}')
@@ -121,16 +128,13 @@ jobs:
                 files_changed_list_for_csv=""
                 percentage_change_per_file=""
 
-                # Robustly loop through filenames to handle spaces and special characters
                 while IFS= read -r file; do
                   if [ -z "$file" ]; then continue; fi
-
                   files_changed_list_for_csv+="$file; "
 
                   if git cat-file -e "$commit_hash^:$file" 2>/dev/null; then
                     total_lines_before=$(git show "$commit_hash^:$file" | wc -l)
                     if [[ $total_lines_before -gt 0 ]]; then
-                      # Use --numstat for per-file stats for better accuracy
                       file_diff_stats=$(git diff --numstat "$commit_hash^" "$commit_hash" -- "$file")
                       added_in_file=$(echo "$file_diff_stats" | awk '{print $1}')
                       deleted_in_file=$(echo "$file_diff_stats" | awk '{print $2}')
