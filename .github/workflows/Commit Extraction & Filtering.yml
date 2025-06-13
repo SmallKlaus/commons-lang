@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0 # Fetches all history for all branches and tags
 
@@ -83,6 +83,8 @@ jobs:
         env:
           HF_API_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          set -e # This will cause the script to fail immediately if any command fails
+
           tags_input="${{ github.event.inputs.version_tags }}"
           sorted_tags=$(echo "$tags_input" | tr ',' '\n' | sed 's/ //g' | sort -V -r)
           IFS=$'\n' read -r -d '' -a tag_array <<< "$sorted_tags"
@@ -97,13 +99,12 @@ jobs:
             next_tag=${tag_array[$((i+1))]}
             
             echo "Processing commits between $next_tag and $prev_tag"
-            csv_file="commits_${next_tag}_to_${prev_tag}.csv"
+            csv_file="commits_${next_tag//\//-}_to_${prev_tag//\//-}.csv" # Sanitize slashes in filenames
             echo "commit_hash,commit_message,commit_date,changed_files,lines_added,lines_deleted,percentage_change" > $csv_file
 
             # Get commit hashes and messages for the range
             git log --pretty='format:%H ||| %s' "$next_tag..$prev_tag" | while IFS=' ||| ' read -r commit_hash commit_message; do
               # Classify the commit message using the Python script
-              # We escape the commit message to handle quotes and special characters
               escaped_message=$(printf '%s\n' "$commit_message" | sed "s/'/'\"'\"'/g")
               classification=$(python classify_commit.py "$escaped_message")
 
@@ -111,31 +112,33 @@ jobs:
               if [ "$classification" == "new feature" ]; then
                 echo "Found feature commit: $commit_hash"
                 commit_date=$(git log -1 --pretty=%ci "$commit_hash")
-                stats=$(git show --shortstat --pretty="" "$commit_hash")
-                lines_added=$(echo "$stats" | grep "insertion" | awk '{print $1}')
-                lines_deleted=$(echo "$stats" | grep "deletion" | awk '{print $1}')
+                
+                # Use --numstat for a robust and machine-readable way to get line counts
+                numstat_output=$(git show --numstat --pretty="" "$commit_hash")
+                lines_added=$(echo "$numstat_output" | awk '{s+=$1} END {print s+0}')
+                lines_deleted=$(echo "$numstat_output" | awk '{s+=$2} END {print s+0}')
                 
                 files_changed_list_for_csv=""
                 percentage_change_per_file=""
 
                 # Robustly loop through filenames to handle spaces and special characters
                 while IFS= read -r file; do
-                  # Skip empty lines that might result from the command
                   if [ -z "$file" ]; then continue; fi
 
-                  # Build a semicolon-separated list for the CSV column
                   files_changed_list_for_csv+="$file; "
 
                   if git cat-file -e "$commit_hash^:$file" 2>/dev/null; then
                     total_lines_before=$(git show "$commit_hash^:$file" | wc -l)
                     if [[ $total_lines_before -gt 0 ]]; then
-                      file_diff_stats=$(git diff --shortstat "$commit_hash^" "$commit_hash" -- "$file")
-                      added_in_file=$(echo "$file_diff_stats" | grep "insertion" | awk '{print $1}')
-                      deleted_in_file=$(echo "$file_diff_stats" | grep "deletion" | awk '{print $1}')
+                      # Use --numstat for per-file stats for better accuracy
+                      file_diff_stats=$(git diff --numstat "$commit_hash^" "$commit_hash" -- "$file")
+                      added_in_file=$(echo "$file_diff_stats" | awk '{print $1}')
+                      deleted_in_file=$(echo "$file_diff_stats" | awk '{print $2}')
+                      
                       added_in_file=${added_in_file:-0}
                       deleted_in_file=${deleted_in_file:-0}
                       total_changed=$((added_in_file + deleted_in_file))
-                      percent=$(awk -v total_changed="$total_changed" -v total_lines_before="$total_lines_before" 'BEGIN {printf "%.2f", (total_changed / total_lines_before) * 100}')
+                      percent=$(awk -v tc="$total_changed" -v tlb="$total_lines_before" 'BEGIN {printf "%.2f", (tc / tlb) * 100}')
                       percentage_change_per_file+="$file:${percent}%; "
                     else
                       percentage_change_per_file+="$file:100%; " # File was empty
@@ -145,13 +148,12 @@ jobs:
                   fi
                 done < <(git diff-tree --no-commit-id --name-only -r "$commit_hash")
                 
-                echo "\"$commit_hash\",\"$commit_message\",\"$commit_date\",\"$files_changed_list_for_csv\",\"${lines_added:-0}\",\"${lines_deleted:-0}\",\"$percentage_change_per_file\"" >> $csv_file
+                echo "\"$commit_hash\",\"$commit_message\",\"$commit_date\",\"$files_changed_list_for_csv\",\"${lines_added}\",\"${lines_deleted}\",\"$percentage_change_per_file\"" >> $csv_file
               fi
             done
           done
 
       - name: Upload CSV Artifacts
-        # Updated from v3 to v4 to resolve the deprecation error
         uses: actions/upload-artifact@v4
         with:
           name: commit-reports
