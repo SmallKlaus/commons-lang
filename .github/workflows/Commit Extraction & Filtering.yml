@@ -26,7 +26,7 @@ jobs:
           python-version: '3.9'
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests jq
 
       - name: Create classification script
         run: |
@@ -154,16 +154,20 @@ jobs:
                 if [ -n "$jira_key" ]; then
                   echo "DEBUG: Found Jira key: $jira_key"
                   jira_url="https://issues.apache.org/jira/rest/api/2/issue/$jira_key"
-                  # Use curl with -f to fail silently on server errors (like 404), and -s for silent mode
-                  jira_json=$(curl -s -f --connect-timeout 10 "$jira_url")
+                  # Removed -f from curl to prevent exit on 404. We will check the JSON response instead.
+                  jira_json=$(curl -s --connect-timeout 10 "$jira_url")
                   
-                  if [ -n "$jira_json" ]; then
+                  # Check if the response contains Jira's error message, indicating the issue doesn't exist
+                  if echo "$jira_json" | jq -e '.errorMessages' > /dev/null; then
+                    echo "DEBUG: Invalid Jira key $jira_key (does not exist)."
+                    jira_summary="INVALID_KEY"
+                  elif [ -n "$jira_json" ]; then
                     jira_summary=$(echo "$jira_json" | jq -r '.fields.summary // "N/A"')
                     jira_issuetype=$(echo "$jira_json" | jq -r '.fields.issuetype.name // "N/A"')
                     echo "DEBUG: Jira Summary: $jira_summary, Type: $jira_issuetype"
                     context_for_nlp="Commit subject: $commit_subject. Jira Issue Type: $jira_issuetype. Jira Summary: $jira_summary"
                   else
-                    echo "DEBUG: Could not fetch details for Jira key $jira_key"
+                    echo "DEBUG: Could not fetch details for Jira key $jira_key (empty response)."
                     jira_summary="FETCH_FAILED"
                   fi
                 fi
