@@ -1,0 +1,147 @@
+# This GitHub workflow extracts commits between version tags and uses a Natural Language Processing (NLP)
+# model via the Hugging Face API for binary classification. It identifies commits that are new features
+# and exports their data to a CSV file for each version interval.
+
+name: Extract Feature Commits with NLP
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_tags:
+        description: 'A comma-separated list of version tags to process (e.g., v1.0.0,v1.1.0,v1.2.0)'
+        required: true
+
+jobs:
+  extract-commits:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0 # Fetches all history for all branches and tags
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Create classification script
+        run: |
+          cat <<'EOF' > classify_commit.py
+          import os
+          import sys
+          import requests
+          import json
+
+          # Get the Hugging Face API token from environment variables
+          API_TOKEN = os.environ.get("HF_TOKEN")
+          if not API_TOKEN:
+              raise ValueError("Hugging Face API token not found. Please set the HF_TOKEN secret.")
+
+          # The specific zero-shot classification model we'll use
+          API_URL = "https://api-inference.huggingface.co/models/valhalla/distilbart-mnli-12-3"
+          headers = {"Authorization": f"Bearer {API_TOKEN}"}
+
+          def query(payload):
+              """Sends a request to the Hugging Face API and returns the response."""
+              response = requests.post(API_URL, headers=headers, json=payload)
+              return response.json()
+
+          if __name__ == "__main__":
+              commit_message = sys.argv[1]
+              # Use binary labels for a clearer feature vs. non-feature distinction
+              candidate_labels = ["new feature", "other"]
+              
+              try:
+                  output = query({
+                      "inputs": commit_message,
+                      "parameters": {"candidate_labels": candidate_labels},
+                  })
+
+                  # Check for a valid response structure
+                  if isinstance(output, dict) and 'labels' in output and 'scores' in output:
+                      # The API returns labels sorted by score, so the first one is the best fit
+                      primary_label = output['labels'][0]
+                      print(primary_label)
+                  else:
+                      # Print a default or error indicator if the response is not as expected
+                      print("classification_failed")
+
+              except requests.exceptions.RequestException as e:
+                  print(f"api_error: {e}")
+              except Exception as e:
+                  print(f"script_error: {e}")
+
+          EOF
+
+      - name: Extract and Process Commits
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          tags_input="${{ github.event.inputs.version_tags }}"
+          sorted_tags=$(echo "$tags_input" | tr ',' '\n' | sed 's/ //g' | sort -V -r)
+          IFS=$'\n' read -r -d '' -a tag_array <<< "$sorted_tags"
+
+          if [ ${#tag_array[@]} -lt 2 ]; then
+            echo "Error: Please provide at least two tags to compare."
+            exit 1
+          fi
+
+          for i in $(seq 0 $((${#tag_array[@]} - 2))); do
+            prev_tag=${tag_array[$i]}
+            next_tag=${tag_array[$((i+1))]}
+            
+            echo "Processing commits between $next_tag and $prev_tag"
+            csv_file="commits_${next_tag}_to_${prev_tag}.csv"
+            echo "commit_hash,commit_message,commit_date,changed_files,lines_added,lines_deleted,percentage_change" > $csv_file
+
+            # Get commit hashes and messages for the range
+            git log --pretty='format:%H ||| %s' "$next_tag..$prev_tag" | while IFS=' ||| ' read -r commit_hash commit_message; do
+              # Classify the commit message using the Python script
+              # We escape the commit message to handle quotes and special characters
+              escaped_message=$(printf '%s\n' "$commit_message" | sed "s/'/'\"'\"'/g")
+              classification=$(python classify_commit.py "$escaped_message")
+
+              # Only process commits classified as 'new feature'
+              if [ "$classification" == "new feature" ]; then
+                echo "Found feature commit: $commit_hash"
+                commit_date=$(git log -1 --pretty=%ci $commit_hash)
+                stats=$(git show --shortstat --pretty="" $commit_hash)
+                files_changed_list=$(git diff-tree --no-commit-id --name-only -r $commit_hash | tr '\n' ' ')
+                lines_added=$(echo "$stats" | grep "insertion" | awk '{print $1}')
+                lines_deleted=$(echo "$stats" | grep "deletion" | awk '{print $1}')
+                
+                percentage_change_per_file=""
+                for file in $files_changed_list; do
+                  if git cat-file -e $commit_hash^:"$file" 2>/dev/null; then
+                    total_lines_before=$(git show $commit_hash^:"$file" | wc -l)
+                    if [[ $total_lines_before -gt 0 ]]; then
+                      file_diff_stats=$(git diff --shortstat $commit_hash^ $commit_hash -- "$file")
+                      added_in_file=$(echo "$file_diff_stats" | grep "insertion" | awk '{print $1}')
+                      deleted_in_file=$(echo "$file_diff_stats" | grep "deletion" | awk '{print $1}')
+                      added_in_file=${added_in_file:-0}
+                      deleted_in_file=${deleted_in_file:-0}
+                      total_changed=$((added_in_file + deleted_in_file))
+                      percent=$(awk "BEGIN {printf \"%.2f\", ($total_changed / $total_lines_before) * 100}")
+                      percentage_change_per_file+="$file:${percent}%; "
+                    else
+                      percentage_change_per_file+="$file:100%; "
+                    fi
+                  else
+                    percentage_change_per_file+="$file:100%; "
+                  fi
+                done
+                
+                echo "\"$commit_hash\",\"$commit_message\",\"$commit_date\",\"$files_changed_list\",\"${lines_added:-0}\",\"${lines_deleted:-0}\",\"$percentage_change_per_file\"" >> $csv_file
+              fi
+            done
+          done
+
+      - name: Upload CSV Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: commit-reports
+          path: ./*.csv
