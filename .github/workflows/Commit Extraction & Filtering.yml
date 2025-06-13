@@ -93,13 +93,18 @@ jobs:
           tags_input="${{ github.event.inputs.version_tags }}"
           echo "DEBUG: Raw input tags: '$tags_input'"
 
-          sorted_tags=$(echo "$tags_input" | tr ',' '\n' | sed 's/ //g' | sort -V -r)
-          echo "--- DEBUG: Sorted tags string ---"
-          echo "$sorted_tags"
+          # More robust method to read sorted tags into an array
+          tag_array=()
+          while IFS= read -r line; do
+              if [[ -n "$line" ]]; then # Ensure we don't add empty lines
+                  tag_array+=("$line")
+              fi
+          done < <(echo "$tags_input" | tr ',' '\n' | sed 's/ //g' | sort -V -r)
+          
+          echo "--- DEBUG: Tags in array ---"
+          printf " - %s\n" "${tag_array[@]}"
           echo "--- END DEBUG ---"
-
-          # Read the sorted tags into a bash array
-          IFS=$'\n' read -r -d '' -a tag_array <<< "$sorted_tags"
+          
           echo "DEBUG: Number of tags in array: ${#tag_array[@]}"
 
           if [ ${#tag_array[@]} -lt 2 ]; then
