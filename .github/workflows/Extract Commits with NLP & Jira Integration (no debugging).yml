@@ -1,0 +1,187 @@
+# This GitHub workflow extracts commits between version tags. It integrates with Apache's public Jira
+# to enrich commit data, then uses an NLP model for binary classification. It identifies commits
+# that are new features, filters for changes in .java files, and exports detailed per-file data to a CSV file.
+
+name: Extract Feature Commits with NLP and Jira Integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_tags:
+        description: 'A comma-separated list of version tags to process (e.g., v1.0.0,v1.1.0,v1.2.0)'
+        required: true
+
+jobs:
+  extract-commits:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetches all history for all branches and tags
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: pip install requests jq
+
+      - name: Create classification script
+        run: |
+          cat <<'EOF' > classify_commit.py
+          import os
+          import sys
+          import requests
+          import json
+
+          # Get the Hugging Face API token from environment variables
+          API_TOKEN = os.environ.get("HF_API_TOKEN")
+          if not API_TOKEN:
+              raise ValueError("Hugging Face API token not found. Please set the HF_API_TOKEN secret.")
+
+          # The specific zero-shot classification model we'll use
+          API_URL = "https://api-inference.huggingface.co/models/valhalla/distilbart-mnli-12-3"
+          headers = {"Authorization": f"Bearer {API_TOKEN}"}
+
+          def query(payload):
+              """Sends a request to the Hugging Face API and returns the response."""
+              response = requests.post(API_URL, headers=headers, json=payload)
+              response.raise_for_status() # Will raise an HTTPError for bad responses
+              return response.json()
+
+          if __name__ == "__main__":
+              # Read the context from standard input for safer handling of special characters
+              context = sys.stdin.read().strip()
+              
+              # Use binary labels for a clearer feature vs. non-feature distinction
+              candidate_labels = ["new feature", "other"]
+              
+              try:
+                  output = query({
+                      "inputs": context,
+                      "parameters": {"candidate_labels": candidate_labels},
+                  })
+
+                  # Check for a valid response structure
+                  if isinstance(output, dict) and 'labels' in output and 'scores' in output:
+                      # The API returns labels sorted by score, so the first one is the best fit
+                      primary_label = output['labels'][0]
+                      print(primary_label)
+                  else:
+                      # Print a default or error indicator if the response is not as expected
+                      print("classification_failed")
+
+              # Corrected exception handling
+              except requests.exceptions.RequestException as e:
+                  print(f"api_error: {e}")
+              except Exception as e:
+                  print(f"script_error: {e}")
+
+          EOF
+
+      - name: Extract and Process Commits
+        env:
+          HF_API_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          # Set -e to fail on any error
+          set -e
+
+          tags_input="${{ github.event.inputs.version_tags }}"
+
+          # More robust method to read sorted tags into an array
+          tag_array=()
+          while IFS= read -r line; do
+              if [[ -n "$line" ]]; then # Ensure we don't add empty lines
+                  tag_array+=("$line")
+              fi
+          done < <(echo "$tags_input" | tr ',' '\n' | sed 's/ //g' | sort -V -r)
+          
+          if [ ${#tag_array[@]} -lt 2 ]; then
+            echo "Error: Found less than two valid tags to compare. Please check your input."
+            exit 1
+          fi
+
+          for i in $(seq 0 $((${#tag_array[@]} - 2))); do
+            prev_tag=${tag_array[$i]}
+            next_tag=${tag_array[$((i+1))]}
+            
+            sanitized_prev_tag=$(echo "$prev_tag" | tr '/' '-')
+            sanitized_next_tag=$(echo "$next_tag" | tr '/' '-')
+            csv_file="commits_${sanitized_next_tag}_to_${sanitized_prev_tag}.csv"
+            
+            echo "Processing commits between '$next_tag' and '$prev_tag' -> $csv_file"
+            # Updated CSV header with Jira columns
+            echo "commit_hash,commit_message,commit_date,jira_key,jira_summary,changed_file,lines_added,lines_deleted,percentage_change" > "$csv_file"
+
+            commit_hashes=()
+            while IFS= read -r line; do
+                commit_hashes+=("$line")
+            done < <(git log --pretty=%H "$next_tag..$prev_tag")
+
+            for commit_hash in "${commit_hashes[@]}"; do
+              java_files=$(git diff-tree --no-commit-id --name-only -r "$commit_hash" | grep '\.java$' || true)
+
+              if [ -n "$java_files" ]; then
+                commit_message_full=$(git log -1 --pretty=%B "$commit_hash")
+                commit_subject=$(echo "$commit_message_full" | head -n 1)
+
+                # --- JIRA INTEGRATION ---
+                jira_key=$(echo "$commit_message_full" | grep -o -E 'LANG-[0-9]+' | head -n 1 || true)
+                context_for_nlp="$commit_subject"
+                jira_summary="N/A"
+
+                if [ -n "$jira_key" ]; then
+                  jira_url="https://issues.apache.org/jira/rest/api/2/issue/$jira_key"
+                  jira_json=$(curl -s --connect-timeout 10 "$jira_url")
+                  
+                  if ! echo "$jira_json" | jq -e '.errorMessages' > /dev/null 2>&1 && [ -n "$jira_json" ]; then
+                    jira_summary=$(echo "$jira_json" | jq -r '.fields.summary // "N/A"')
+                    jira_issuetype=$(echo "$jira_json" | jq -r '.fields.issuetype.name // "N/A"')
+                    context_for_nlp="Commit subject: $commit_subject. Jira Issue Type: $jira_issuetype. Jira Summary: $jira_summary"
+                  else
+                    jira_summary="INVALID_OR_FETCH_FAILED"
+                  fi
+                fi
+                # --- END JIRA INTEGRATION ---
+                
+                java_files_list=$(echo "$java_files" | tr '\n' ' ')
+                context_for_nlp="$context_for_nlp. Files changed: $java_files_list"
+                
+                classification=$(echo "$context_for_nlp" | python classify_commit.py)
+
+                if [ "$classification" == "new feature" ]; then
+                  commit_date=$(git log -1 --pretty=%ci "$commit_hash")
+
+                  echo "$java_files" | while IFS= read -r file; do
+                    file_diff_stats=$(git diff --numstat "$commit_hash^" "$commit_hash" -- "$file")
+                    lines_added_per_file=$(echo "$file_diff_stats" | awk '{print $1}')
+                    lines_deleted_per_file=$(echo "$file_diff_stats" | awk '{print $2}')
+
+                    percentage_change="0.00"
+                    if git cat-file -e "$commit_hash^:$file" 2>/dev/null; then
+                      total_lines_before=$(git show "$commit_hash^:$file" | wc -l)
+                      if [[ $total_lines_before -gt 0 ]]; then
+                        total_changed=$((lines_added_per_file + lines_deleted_per_file))
+                        percent=$(awk -v tc="$total_changed" -v tlb="$total_lines_before" 'BEGIN {printf "%.2f", (tc / tlb) * 100}')
+                        percentage_change=$percent
+                      else
+                        percentage_change="100.00"
+                      fi
+                    else
+                      percentage_change="100.00"
+                    fi
+                    
+                    echo "\"$commit_hash\",\"$commit_subject\",\"$commit_date\",\"$jira_key\",\"$jira_summary\",\"$file\",\"$lines_added_per_file\",\"$lines_deleted_per_file\",\"${percentage_change}%;\"" >> "$csv_file"
+                  done
+                fi
+              fi
+            done
+          done
+
+      - name: Upload CSV Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: commit-reports
+          path: ./*.csv
