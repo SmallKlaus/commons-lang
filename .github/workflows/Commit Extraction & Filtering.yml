@@ -85,37 +85,60 @@ jobs:
         env:
           HF_API_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          set -e # This will cause the script to fail immediately if any command fails
+          # Enable verbose debugging: -e fails on error, -x prints each command
+          set -ex
 
+          echo "DEBUG: Starting commit extraction process..."
+          
           tags_input="${{ github.event.inputs.version_tags }}"
+          echo "DEBUG: Raw input tags: '$tags_input'"
+
           sorted_tags=$(echo "$tags_input" | tr ',' '\n' | sed 's/ //g' | sort -V -r)
+          echo "--- DEBUG: Sorted tags string ---"
+          echo "$sorted_tags"
+          echo "--- END DEBUG ---"
+
+          # Read the sorted tags into a bash array
           IFS=$'\n' read -r -d '' -a tag_array <<< "$sorted_tags"
+          echo "DEBUG: Number of tags in array: ${#tag_array[@]}"
 
           if [ ${#tag_array[@]} -lt 2 ]; then
-            echo "Error: Please provide at least two tags to compare."
+            echo "Error: Found less than two valid tags to compare. Please check your input."
             exit 1
           fi
+
+          echo "DEBUG: Tag check passed. Starting main loop."
 
           for i in $(seq 0 $((${#tag_array[@]} - 2))); do
             prev_tag=${tag_array[$i]}
             next_tag=${tag_array[$((i+1))]}
             
-            echo "Processing commits between $next_tag and $prev_tag"
-            csv_file="commits_${next_tag//\//-}_to_${prev_tag//\//-}.csv" # Sanitize slashes in filenames
-            echo "commit_hash,commit_message,commit_date,changed_files,lines_added,lines_deleted,percentage_change" > $csv_file
+            echo "DEBUG: Loop iteration $i: prev_tag='$prev_tag', next_tag='$next_tag'"
+            
+            # Sanitize tag names for use in filenames by replacing slashes
+            sanitized_prev_tag=$(echo "$prev_tag" | tr '/' '-')
+            sanitized_next_tag=$(echo "$next_tag" | tr '/' '-')
+            csv_file="commits_${sanitized_next_tag}_to_${sanitized_prev_tag}.csv"
+            
+            echo "Processing commits between '$next_tag' and '$prev_tag'"
+            echo "Outputting to: $csv_file"
+            echo "commit_hash,commit_message,commit_date,changed_files,lines_added,lines_deleted,percentage_change" > "$csv_file"
 
             # Get all commit hashes into an array first to avoid subshell issues with pipes
             commit_hashes=()
             while IFS= read -r line; do
                 commit_hashes+=("$line")
             done < <(git log --pretty=%H "$next_tag..$prev_tag")
+            echo "DEBUG: Found ${#commit_hashes[@]} commits in range."
 
             # Loop over the array of commit hashes
             for commit_hash in "${commit_hashes[@]}"; do
               commit_message=$(git log -1 --pretty=%s "$commit_hash")
+              echo "DEBUG: Processing commit $commit_hash: $commit_message"
 
               # Classify the commit message by piping it to the Python script
               classification=$(echo "$commit_message" | python classify_commit.py)
+              echo "DEBUG: Classification result: '$classification'"
 
               if [ "$classification" == "new feature" ]; then
                 echo "Found feature commit: $commit_hash"
@@ -152,10 +175,11 @@ jobs:
                   fi
                 done < <(git diff-tree --no-commit-id --name-only -r "$commit_hash")
                 
-                echo "\"$commit_hash\",\"$commit_message\",\"$commit_date\",\"$files_changed_list_for_csv\",\"${lines_added}\",\"${lines_deleted}\",\"$percentage_change_per_file\"" >> $csv_file
+                echo "\"$commit_hash\",\"$commit_message\",\"$commit_date\",\"$files_changed_list_for_csv\",\"${lines_added}\",\"${lines_deleted}\",\"$percentage_change_per_file\"" >> "$csv_file"
               fi
             done
           done
+          echo "DEBUG: Script finished successfully."
 
       - name: Upload CSV Artifacts
         uses: actions/upload-artifact@v4
