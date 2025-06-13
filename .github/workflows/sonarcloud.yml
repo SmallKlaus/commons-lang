@@ -178,7 +178,7 @@ jobs:
             echo "4. Exporting CSV reports for $tag..."
             
             # --- Metrics CSV ---
-            metrics_response=$(curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/measures/component?component=${SONAR_PROJECT}&branch=${tag}&metricKeys=bugs,reliability_rating,vulnerabilities,security_rating,security_hotspots,security_review_rating,code_smells,sqale_rating,sqale_index,sqale_debt_ratio,coverage,lines_to_cover,uncovered_lines,tests,test_success_density,duplicated_lines_density,duplicated_lines,duplicated_blocks,ncloc,lines,files,functions,classes,comment_lines_density,complexity,cognitive_complexity")
+            metrics_response=$(curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/measures/component?component=${SONAR_PROJECT}&branch=master&metricKeys=bugs,reliability_rating,vulnerabilities,security_rating,security_hotspots,security_review_rating,code_smells,sqale_rating,sqale_index,sqale_debt_ratio,coverage,lines_to_cover,uncovered_lines,tests,test_success_density,duplicated_lines_density,duplicated_lines,duplicated_blocks,ncloc,lines,files,functions,classes,comment_lines_density,complexity,cognitive_complexity")
             # VALIDATION: Check if the API returned a valid component before processing
             if [[ $(echo "$metrics_response" | jq 'has("component")') == "true" ]]; then
               # FIXED: Use sanitized_tag for the filename
@@ -192,7 +192,7 @@ jobs:
             # FIXED: Use sanitized_tag for the filename
             echo "Key,Rule,Severity,Type,FilePath,Line,Message" > reports/open-issues-${sanitized_tag}.csv
             page=1; while : ; do
-              issues_response=$(curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT}&branch=${tag}&statuses=OPEN,CONFIRMED&ps=500&p=${page}&f=key,rule,severity,type,component,line,message")
+              issues_response=$(curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT}&branch=master&statuses=OPEN,CONFIRMED&ps=500&p=${page}&f=key,rule,severity,type,component,line,message")
               # VALIDATION: Check if the API returned an 'issues' array
               if [[ $(echo "$issues_response" | jq 'has("issues")') != "true" ]]; then
                 echo "WARNING: Could not fetch open issues for tag $tag. API response: $issues_response"
@@ -207,7 +207,7 @@ jobs:
               # FIXED: Use sanitized_tag for the filename
               echo "Key,Rule,Severity,Type,FilePath,Line,Message" > reports/fixed-issues-${sanitized_tag}.csv
               page=1; while : ; do
-                fixed_issues_response=$(curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT}&branch=${tag}&statuses=RESOLVED,CLOSED&resolutions=FIXED&resolvedAfter=${previous_date}&ps=500&p=${page}&f=key,rule,severity,type,component,line,message")
+                fixed_issues_response=$(curl -s -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT}&branch=master&statuses=RESOLVED,CLOSED&resolutions=FIXED&resolvedAfter=${previous_date}&ps=500&p=${page}&f=key,rule,severity,type,component,line,message")
                 # VALIDATION: Check if the API returned an 'issues' array
                 if [[ $(echo "$fixed_issues_response" | jq 'has("issues")') != "true" ]]; then
                   echo "WARNING: Could not fetch fixed issues for tag $tag. API response: $fixed_issues_response"
