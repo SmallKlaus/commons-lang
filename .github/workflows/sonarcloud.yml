@@ -110,6 +110,7 @@ jobs:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
       SONAR_ORG: smallklaus 
       SONAR_PROJECT: smallklaus_commons-lang  
+      PROJECT: commons-lang
       
     steps:
       # STEP 1: Checkout the full repository history to provide Git context
@@ -226,5 +227,5 @@ jobs:
       - name: Upload All Reports
         uses: actions/upload-artifact@v4
         with:
-          name: sonar-detailed-reports
+          name: sonar-detailed-reports-${{env.PROJECT}}
           path: reports/
